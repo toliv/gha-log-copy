@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GitHub Actions Log Copy",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Copy GitHub Actions step logs with one click.",
   "homepage_url": "https://oliverio.dev/projects/github-actions-log-copy/",
   "permissions": ["clipboardWrite"],
