@@ -11,6 +11,7 @@ This extension adds a copy button to every step header on GitHub Actions job log
 - adds a copy button to each step header
 - places the button just to the left of the step duration
 - copies only the selected step's log lines
+- provides a separate button to copy only error-level lines
 - auto-expands collapsed steps before copying
 - works in both Chrome and Firefox
 
@@ -20,7 +21,7 @@ GitHub Actions makes it awkward to copy the output of a single step. For long lo
 
 ## How it works
 
-GitHub virtualizes long logs in the page DOM, so copying only the currently rendered nodes would miss off-screen lines. This extension first tries to fetch the step-specific log fragment from the `data-log-url` attribute GitHub already places on each `check-step` element. If that fetch fails, it falls back to copying the currently rendered DOM lines.
+GitHub virtualizes long logs in the page DOM, so copying only the currently rendered nodes would miss off-screen lines. This extension fetches the step-specific log fragment from the `data-log-url` attribute GitHub already places on each `check-step` element. It handles HTML log fragments and plain-text responses according to their content type. If fetching or parsing fails, it leaves the clipboard unchanged and shows a persistent failure indicator; hover over the button for guidance. It never falls back to copying the visible DOM lines.
 
 That endpoint is an internal GitHub UI route, so this is intentionally a pragmatic integration rather than an official GitHub API integration.
 
@@ -72,7 +73,11 @@ See `PRIVACY.md` for the full policy text.
 
 - relies on GitHub's current Actions DOM structure
 - relies on GitHub's internal step log fragment route
-- DOM fallback may still be partial for very large or actively streaming steps
+- the fetched fragment may itself be incomplete if GitHub truncates it or the step is still running; full retrieval for very large logs still needs validation against a signed-in job
+
+## Tests
+
+Run `node --test tests/content.test.cjs` for fetch, clipboard failure, and large plain-text log regressions.
 
 ## License
 

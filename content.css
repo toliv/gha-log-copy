@@ -40,6 +40,11 @@
   pointer-events: none;
 }
 
+.gha-copy-errors-button svg {
+  width: 11px;
+  height: 11px;
+}
+
 .gha-copy-step-button[data-state="success"] {
   color: var(--success-fgColor, #3fb950);
   background: rgba(63, 185, 80, 0.12);
