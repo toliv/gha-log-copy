@@ -3,7 +3,7 @@
 ## Product
 
 - Name: `GitHub Actions Log Copy`
-- Version: `1.0.0`
+- Version: `1.1.0`
 - License: `MIT`
 - Homepage: `https://oliverio.dev/projects/github-actions-log-copy/`
 - Privacy policy: `https://oliverio.dev/privacy/github-actions-log-copy/`
