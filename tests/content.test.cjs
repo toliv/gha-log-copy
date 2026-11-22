@@ -54,11 +54,11 @@ function step(logUrl = "/owner/repo/commit/abc/checks/2/logs/3") {
   };
 }
 
-async function click(context, selectedStep = step()) {
+async function click(context, mode = "all") {
   const button = {
-    dataset: {},
+    dataset: { ghaCopyButton: mode },
     disabled: false,
-    closest: () => selectedStep,
+    closest: () => step(),
     setAttribute(name, value) { this[name] = value; }
   };
   await context.handleCopyButtonClick({
@@ -79,12 +79,134 @@ test("copies all 100,000 plain-text lines including angle brackets and the final
   assert.equal(requests.length, 1);
 });
 
-test("error mode copies only annotated and error-level lines", () => {
+const TIMESTAMP = "2026-01-02T03:04:05.1234567Z ";
+
+test("error mode recognizes failures from many tools", () => {
   const { context } = setup(async () => response("unused"));
+  const errors = [
+    "##[error]Process completed with exit code 1.",
+    "::error file=example.txt,line=5::Invalid input",
+    "ERROR: bad input",
+    "\u001b[31m[CRITICAL]\u001b[0m could not continue",
+    "2026-01-02 03:04:05,123 42 ␛[31mERROR␛[0m worker: invalid input",
+    "example.txt:5:3: error: invalid value",
+    "src/a.ts(10,5): error TS2322: Type 'string' is not assignable to type 'number'.",
+    "  1:7  error  'x' is assigned a value but never used  no-unused-vars",
+    "make: *** [Makefile:3: all] Error 1",
+    "npm ERR! code ELIFECYCLE",
+    "--- FAIL: TestParse (0.00s)",
+    "panic: runtime error: index out of range [3] with length 3",
+    "thread 'main' panicked at src/main.rs:4:5:",
+    "FAILED tests/test_a.py::test_x - AssertionError: assert 1 == 2",
+    "Traceback (most recent call last):",
+    "TypeError [ERR_INVALID_ARG_TYPE]: invalid input",
+    'Exception in thread "main" java.lang.IllegalStateException: failed',
+    "Tests: 1 failed, 0 errors"
+  ];
+  const noise = [
+    "start",
+    "INFO: checking error handling",
+    "2026-01-02 03:04:05,123 42 WARNING worker: expected exception",
+    "[debug] retrying after error",
+    "##[group]Run pytest --fail-fast",
+    "##[warning]Node 16 is deprecated; errors may occur",
+    "Found 0 errors",
+    "Done, no failures",
+    "user terror level: none" // documents the accepted false-positive direction
+  ];
+  // Lines that carry their own logger timestamp are used as-is.
+  const stamp = line => line.startsWith("2026-") ? line : TIMESTAMP + line;
+  for (const line of errors) {
+    assert.equal(context.isErrorLine(stamp(line)), true, line);
+  }
+  for (const line of noise.slice(0, -1)) {
+    assert.equal(context.isErrorLine(stamp(line)), false, line);
+  }
+  assert.equal(context.isErrorLine(noise.at(-1)), true);
+});
+
+test("error mode keeps context around matches, separates blocks and appends the step tail", () => {
+  const { context } = setup(async () => response("unused"));
+  const lines = Array.from({ length: 60 }, (_, index) => `line ${index}`);
+  lines[10] = "ERROR: first";
+  lines[30] = "ERROR: second";
+  const expected = [
+    ...lines.slice(8, 14),
+    "...",
+    ...lines.slice(28, 34),
+    "...",
+    ...lines.slice(40)
+  ];
+  assert.equal(context.filterErrorLines(lines.join("\n")), expected.join("\n"));
+});
+
+test("error mode follows indented stack frames past the context window", () => {
+  const { context } = setup(async () => response("unused"));
+  const frames = Array.from({ length: 30 }, (_, index) => `  File "example.py", line ${index}, in f${index}`);
+  const traceback = ["Traceback (most recent call last):", ...frames, "ValueError: bad input"];
+  const goPanic = [
+    "panic: runtime error: index out of range",
+    "",
+    "goroutine 1 [running]:",
+    "main.main()",
+    "\t/app/main.go:8 +0x1d"
+  ];
+  const filler = Array.from({ length: 10 }, (_, index) => `filler ${index}`);
+  const tail = Array.from({ length: 20 }, (_, index) => `tail ${index}`);
+  const log = [...filler, ...traceback, ...filler, ...goPanic, ...filler, ...tail];
+  const expected = [
+    ...filler.slice(-2), ...traceback, ...filler.slice(0, 3),
+    "...",
+    ...filler.slice(-2), ...goPanic,
+    "...",
+    ...tail
+  ];
   assert.equal(
-    context.filterErrorLines("start\n##[error] failed to compile\ninfo\nERROR: bad input\nfinish"),
-    "##[error] failed to compile\nERROR: bad input"
+    context.filterErrorLines(log.map(line => TIMESTAMP + line).join("\n")),
+    expected.map(line => line === "..." ? line : TIMESTAMP + line).join("\n")
   );
+});
+
+test("error mode treats untimestamped lines as the body of the preceding logger record", () => {
+  const { context } = setup(async () => response("unused"));
+  const record = (level, text) => `2026-01-02 03:04:05,123 42 ␛[1;32m${level}␛[0m app: ${text}`;
+  const traceback = [
+    "Traceback (most recent call last):",
+    '  File "example.py", line 5, in run',
+    "    raise ValueError()",
+    "ValueError: bad input"
+  ];
+  const filler = Array.from({ length: 5 }, (_, index) => record("INFO", `filler ${index}`));
+  const log = [
+    record("INFO", "Starting test_rejects_error_input"),
+    record("INFO", "expected failure path"),
+    ...traceback,
+    ...filler,
+    record("ERROR", "FAIL: test_real_failure"),
+    ...traceback,
+    ...filler,
+    ...Array.from({ length: 20 }, (_, index) => record("INFO", `tail ${index}`))
+  ].map(line => TIMESTAMP + line);
+  // ERROR record at 11 with 2 lines before; its final "ValueError" line (15) adds 3 after.
+  const expected = [...log.slice(9, 19), "...", ...log.slice(-20)];
+  assert.equal(context.filterErrorLines(log.join("\n")), expected.join("\n"));
+});
+
+test("error mode copies the filtered log through the button", async () => {
+  const log = ["start", "ERROR: bad input", "finish"].map(line => TIMESTAMP + line).join("\n");
+  const { context, writes } = setup(async () => response(log));
+  const button = await click(context, "errors");
+  assert.deepEqual(writes, [log]);
+  assert.equal(button.dataset.state, "success");
+});
+
+test("error mode leaves the clipboard unchanged when there are no errors", async () => {
+  const { context, writes } = setup(async () => response(
+    "INFO: expected exception\nall good\nFound 0 errors"
+  ));
+  const button = await click(context, "errors");
+  assert.deepEqual(writes, []);
+  assert.equal(button.dataset.state, "error");
 });
 
 for (const [name, fetchImplementation] of [
