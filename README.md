@@ -11,7 +11,7 @@ This extension adds a copy button to every step header on GitHub Actions job log
 - adds a copy button to each step header
 - places the button just to the left of the step duration
 - copies only the selected step's log lines
-- provides a separate button to copy only error-level lines
+- provides a separate button to copy just the error lines, with surrounding context, stack traces and the end of the step
 - auto-expands collapsed steps before copying
 - works in both Chrome and Firefox
 

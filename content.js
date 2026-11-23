@@ -11,6 +11,23 @@ const COPY_ERRORS_LABEL = "Copy error lines";
 const COPY_RESET_DELAY_MS = 1800;
 const FETCH_TIMEOUT_MS = 60000;
 const JOB_ROUTE_RE = /^\/[^/]+\/[^/]+\/actions\/runs\/[^/]+\/job\/[^/]+\/?$/;
+const LOG_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?(?:[ \t]|$)/;
+const ANSI_ESCAPE_RE = /[\x1b\u241b]\[[0-?]*[ -/]*[@-~]/g;
+// Deliberately broad: missing the real failure is worse than copying an extra line.
+// No leading \b on error/exception so TypeError, IOException, etc. match.
+const ERROR_KEYWORD_RE = /(?:error|exception)s?\b|\b(?:fail(?:s|ed|ures?)?|fatal|critical|panic(?:ked)?|traceback)\b|\bERR!/i;
+const ANNOTATION_ERROR_RE = /^(?:##\[error\]|::error\b)/i;
+// Lines that mention errors but are not failures: lower log levels and GitHub
+// non-error commands such as ##[group]Run pytest --fail-fast.
+const NOISE_LINE_RE = /^(?:##\[(?:debug|warning|notice|command|group|endgroup)\]|::(?:debug|warning|notice|group|endgroup)\b|(?:\d+\s+)?\[?(?:trace|debug|verbose|info|notice|warn(?:ing)?)\]?(?:[\s:]|$))/i;
+const ZERO_COUNT_RE = /\b(?:0|no) (?:errors?|failures?|failed)\b/gi;
+const CONTEXT_BEFORE = 2;
+const CONTEXT_AFTER = 3;
+// Indented lines after a match (stack frames, compiler notes) extend the block.
+const MAX_CONTINUATION = 200;
+// The end of a failed step almost always contains the actual failure.
+const TAIL_LINES = 20;
+const BLOCK_SEPARATOR = "...";
 
 const COPY_ICON_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M216,32H88a8,8,0,0,0-8,8V80H40a8,8,0,0,0-8,8V216a8,8,0,0,0,8,8H168a8,8,0,0,0,8-8V176h40a8,8,0,0,0,8-8V40A8,8,0,0,0,216,32ZM160,208H48V96H160Zm48-48H176V88a8,8,0,0,0-8-8H96V48H208Z"/></svg>';
@@ -301,18 +318,85 @@ function normalizeCopiedText(text) {
 }
 
 function filterErrorLines(text) {
-  const lines = text.split("\n").filter(isErrorLine);
-  if (!lines.length) {
+  const lines = text.split("\n");
+  const keep = new Array(lines.length).fill(false);
+  let found = false;
+  let inNoiseRecord = false;
+
+  for (let index = 0; index < lines.length; index++) {
+    const { text: message, startsRecord } = parseLogLine(lines[index]);
+    const kind = lineKind(message);
+    if (startsRecord) {
+      inNoiseRecord = kind === "noise";
+    } else if (inNoiseRecord) {
+      // Body of an INFO/WARNING record, such as a traceback a test expected.
+      continue;
+    }
+    if (kind !== "error") {
+      continue;
+    }
+    found = true;
+    const end = errorBlockEnd(lines, index);
+    for (let line = Math.max(0, index - CONTEXT_BEFORE); line <= end; line++) {
+      keep[line] = true;
+    }
+  }
+
+  if (!found) {
     throw new Error("No error lines found in step log");
   }
-  return lines.join("\n");
+  for (let line = Math.max(0, lines.length - TAIL_LINES); line < lines.length; line++) {
+    keep[line] = true;
+  }
+
+  const output = [];
+  for (let index = 0; index < lines.length; index++) {
+    if (!keep[index]) {
+      continue;
+    }
+    if (output.length && !keep[index - 1]) {
+      output.push(BLOCK_SEPARATOR);
+    }
+    output.push(lines[index]);
+  }
+  return output.join("\n");
+}
+
+// Strips colors and GitHub's timestamp. A second, logger-written timestamp marks
+// the start of a structured log record: following lines without one (tracebacks,
+// multi-line messages) belong to that record. GitHub commands always start one.
+function parseLogLine(line) {
+  const message = line.replace(ANSI_ESCAPE_RE, "").replace(LOG_TIMESTAMP_RE, "");
+  const trimmed = message.trim();
+  const hasLoggerTimestamp = LOG_TIMESTAMP_RE.test(trimmed);
+  return {
+    message,
+    text: trimmed.replace(LOG_TIMESTAMP_RE, "").trim(),
+    startsRecord: hasLoggerTimestamp || /^(?:##\[|::)/.test(trimmed)
+  };
+}
+
+function lineKind(text) {
+  if (ANNOTATION_ERROR_RE.test(text)) {
+    return "error";
+  }
+  if (NOISE_LINE_RE.test(text)) {
+    return "noise";
+  }
+  return ERROR_KEYWORD_RE.test(text.replace(ZERO_COUNT_RE, "")) ? "error" : null;
 }
 
 function isErrorLine(line) {
-  const trimmed = line.trim();
-  return /^##\[(?:error|failure)\]/i.test(trimmed) ||
-    /^(?:error|fatal|critical)\s*[:[]/i.test(trimmed) ||
-    /\b(?:error|fatal|critical|exception|traceback)\b/i.test(trimmed);
+  return lineKind(parseLogLine(line).text) === "error";
+}
+
+function errorBlockEnd(lines, start) {
+  let end = Math.min(lines.length - 1, start + CONTEXT_AFTER);
+  const limit = end + MAX_CONTINUATION;
+  while (end + 1 < lines.length && end < limit && /^\s+\S/.test(parseLogLine(lines[end + 1]).message)) {
+    end++;
+  }
+  return end;
 }
 
 function waitFor(predicate, timeoutMs) {
